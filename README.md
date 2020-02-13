@@ -1,5 +1,5 @@
 # AirBnB-Project-R
-Project analyzing AirBnB listing data in NYC using R
+Project analyzing AirBnB listing data in NYC with a decison tree model and NLP techniques using R
 
   I started the challenge by building an understanding of the data and business question at hand. Then, I moved on to data preparation and feature engineering. During model selection, I built a decision tree model and sought to incorporate NLP techniques into the findings. Once the model was finalized and trained, it was validated and tested on additional data. The strength of the findings was bolstered by consistent accuracy and precision measurements through all stages of the process.
 
