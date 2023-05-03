@@ -1,0 +1,254 @@
+---
+title: "AirBnB Listing Model"
+output: html_document
+date: "2020-07-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+load libraries
+
+```{r libraries, echo = TRUE}
+library(data.table) #General syntax and functions
+library(ggplot2) #Visualizations
+library(rpart) #Decision tree
+library(rpart.plot) #Decision tree visualization
+library(quanteda) #NLP
+library(caret)
+
+```
+
+read in data
+```{r data, echo = TRUE}
+setwd('your/working/directory')
+data = fread("airbnb_listings.csv")
+```
+
+EDA
+```{r eda, echo = TRUE}
+
+#Q: how many listings are there?
+nrow(data)
+
+#Q: are all listings in nyc?
+unique(data$neighbourhood_group)
+
+#Q: what is the count by borough?
+table(data$neighbourhood_group)
+
+#Q: What is the room type breakdown
+table(data$room_type)
+
+#Q: how many neighborhoods have listings?
+length(unique(data$neighbourhood))
+
+#Q: what are the summaries of the numeric data?
+summary(data$minimum_nights)
+summary(data$calculated_host_listings_count)
+summary(data$availability_365)
+summary(data$number_of_reviews)
+summary(data$reviews_per_month)
+summary(data$price)
+
+#Q: how many hosts are there?
+length(unique(data$host_id))
+
+#Q: how many unique host names are there?
+length(unique(data$host_name))
+
+
+#Q: How many listings exist per host_id?
+#listings_by_host = 
+host_groupby = data[, .N, by = host_id,]
+host_groupby[order(-N),]
+
+#Q: How many listings exist per night minimum?
+min_nights = data[, .N, by = minimum_nights]
+min_nights[order(minimum_nights)]
+
+
+
+#Q: How many listings have a night minimum of more than 10?
+nrow(data[minimum_nights > 10])
+
+#Q: How many listings exist per availability?
+availability = data[, .N, by = availability_365]
+availability[order(availability_365)]
+
+#Q: How many listings with 0 availability have reviews?
+nrow(data[availability_365 == 0 & number_of_reviews != 0,])
+
+
+#Q: how many listings have no reviews?
+reviews_analysis = data[, .N, by = number_of_reviews]
+reviews_analysis[order(number_of_reviews)]
+
+#visualize listing price distribution across nyc
+#breakdown data in to quartiles
+location_viz_data = data[,c("price", "longitude", "latitude")]
+summary(location_viz_data$price)
+#1st.qu=69, median=105, 3rd.qu=175
+location_viz_data$price_class <- as.character(ifelse(location_viz_data$price > 174.99, 1,
+                           ifelse(location_viz_data$price > 104.99, 2,
+                                  ifelse(location_viz_data$price > 68.99, 3, 4))))
+
+ggplot(location_viz_data, aes(x = longitude, y = latitude, color = price_class)) +
+  geom_point()
+
+
+
+```
+
+data preparation
+```{r data prep, echo = TRUE}
+
+#Remove: all listings that have had no availability in the past 365 days
+#Remove: listings with minimum_nights over 120
+#Remove: listings where minimum_nights > availability_365
+#Remove: listings with no reviews
+prepped_data = data[!(minimum_nights > 120 | availability_365 < minimum_nights |
+                availability_365 == '0' | number_of_reviews == '0') ]
+
+#trim price points above 350 to produce better
+#visualizations. chose 350 bc 2x value at 75th percentile
+#and also did not trim a large number of data points
+prepped_data = prepped_data[price < 350]
+#cut from 25,164 to 23,778
+
+
+#visualize price data___________________________________________________
+#Price has been verified to be independent of vacancy, so visualize
+#listing price information against possible features
+
+ggplot(prepped_data, aes(x = room_type, y = price)) +
+  geom_boxplot()
+
+ggplot(prepped_data, aes(x = neighbourhood_group, y = price)) +
+  geom_boxplot()
+
+```
+
+classify data, evaluate balance 
+```{r classify and evaluate balance, echo = TRUE}
+
+summary(prepped_data$price)
+#1st.qu=65, median=100, 3rd.qu=160
+prepped_data[,target_variable := as.character(ifelse(prepped_data$price > 159.99, 1, 0))]
+
+prepped_data = prepped_data[,price := NULL]
+prepped_data = prepped_data[,host_name := NULL]
+prepped_data = prepped_data[,host_id := NULL]
+
+#determine balance of the class
+target_variable_viz = prepped_data[, .N, by = target_variable]
+ggplot(target_variable_viz, aes(x = target_variable, y = N)) +
+  geom_bar(stat="identity")
+```
+
+tf idf
+```{r nlp - tf idf, echo = TRUE}
+
+tokens = tokens(prepped_data$name, remove_numbers = TRUE, remove_punct = TRUE, remove_symbols = TRUE)
+dfm = dfm(tokens)
+dfm_remove(dfm, stopwords("en"))
+
+tf_idf = dfm_tfidf(dfm, scheme_tf = "count", scheme_df = "inverse", base = 10, force = FALSE)
+top_features = topfeatures(tf_idf, n = 50, decreasing = TRUE)
+
+top_features_dt = as.data.table(top_features, keep.rownames = TRUE)
+tf_idf_dt = as.data.table(tf_idf)
+
+
+text_data = tf_idf_dt[ ,colnames(tf_idf_dt) %in% top_features_dt$rn, with = FALSE]
+
+```
+
+join text data, train/test split
+```{r train test split, echo = TRUE}
+
+prepped_data = prepped_data[,name := NULL]
+
+prepped_data = cbind(prepped_data, text_data)
+
+#train/test split
+set.seed(123)
+prepped_data$num = runif(n = dim(prepped_data)[1], min = 0, max = 1)
+
+train_data = as.data.table(subset(prepped_data, num < 0.7))
+test_data = as.data.table(subset(prepped_data, num >= 0.7))
+
+```
+
+train and evaluate base decision tree model
+```{r train base decision tree, echo = TRUE}
+
+base_model = rpart(target_variable ~ neighbourhood_group + room_type, method = "class", data = train_data)
+rpart.plot(base_model, tweak = 1)
+
+base_model_train_pred = predict(base_model, train_data, type = "class")
+base_model_train_conf_mat = table(train_data$target_variable, base_model_train_pred)
+confusionMatrix(base_model_train_conf_mat)
+
+```
+
+test and evaluate base decision tree model
+```{r test base decision tree, echo = TRUE}
+
+base_model_test_pred = predict(base_model, test_data, type = "class")
+base_model_test_conf_mat = table(test_data$target_variable, base_model_test_pred)
+confusionMatrix(base_model_test_conf_mat)
+
+
+```
+ 
+ 
+train and evaluate nlp model
+```{r train nlp decision tree, echo = TRUE}
+
+#train_tf_idf_dataset = cbind(train_data[,c(16, 5, 9)], train_tf_idf)
+
+nlp_model = rpart(target_variable ~ ., method = "class", data = train_data)
+rpart.plot(nlp_model, tweak = 1)
+
+
+
+nlp_model_train_pred = predict(nlp_model, train_data, type = "class")
+nlp_model_train_conf_mat = table(train_data$target_variable, nlp_model_train_pred)
+confusionMatrix(nlp_model_train_conf_mat)
+
+```
+
+test and evaluate nlp model
+```{r test nlp decision tree, echo = TRUE}
+
+#Error in model.frame.default(Terms, newdata, na.action = na.action, xlev = attr(object,  : 
+#  factor neighbourhood has new levels Bull's Head, Castle Hill, Willowbrook
+
+test_data = test_data[neighbourhood %in% unique(train_data$neighbourhood)]
+#there are a few records in the test data that are listings in neighborhoods that are not in the decision tree, making the model unable to run. so, we remove these rows to allow the model to run.
+
+nlp_model_test_pred = predict(nlp_model, test_data, type = "class")
+nlp_model_test_conf_mat = table(test_data$target_variable, nlp_model_test_pred)
+confusionMatrix(nlp_model_test_conf_mat)
+
+
+
+
+```
+
+
+I first trained and tested a decision tree model that analyzed what borough a listing was in and the room type of the listing. The result was an 80% accurate model that had a true positive rate (sensitivity) of 85% and a true negative rate (specificity) of 61%.
+
+I was interested in seeing how the name of a listing may affect its price. I ran a TF-IDF analysis on the listing names and incorporated the top 50 features from the TF IDF analysis into a second decision tree model. The resulting model had a 4% lift on accuracy, 82%, while also seeing improvements in sensitivity and specificity rates of 88% and 64%, respectively.
+
+I would select the NLP model to be scaled to production since it delivered higher accuracy on the test data while not compromising on specificity or sensitivity.
+
+
+
+
+
+
